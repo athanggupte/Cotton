@@ -1,0 +1,43 @@
+# Binaries
+[Bb]in/
+[Bb]in-int/
+[Oo]bj/
+[Ll]og/
+[Bb]uild/
+!/vendor/bin/
+
+# Generated intermediate embedded code files
+/platform/embed/*.c
+!/platform/embed/context*.c
+
+# Visual Studio Code options directory
+.vscode/
+
+# Visual Studio 2015 cache/options directory
+.vs/
+
+## Project files
+# Python
+__pycache__/
+*.pyc
+
+# Visual Studio project files
+*.sln
+*.vcxproj
+*.vcxproj.*
+
+
+# gmake files
+Makefile
+*.make
+*.a
+*.so
+*.gch
+*.out
+
+## Kate Editor
+.kateproject
+
+## KDevelop IDE
+*.kdev4
+.kdev4/
