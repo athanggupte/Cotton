@@ -2,6 +2,7 @@
     #include <emmintrin.h>
 #endif
 
+//#include "../platform/context_asm__x64.h"
 #include <stddef.h>
 
 struct Context
@@ -21,8 +22,9 @@ struct Context
 #endif
 };
 
-extern void (*get_context)(Context*);
-extern void (*set_context)(Context*);
-extern void (*swap_context)(Context* current, Context* target);
+//static_assert(COTTON_CONTEXT_RCX == offsetof(Context, rcx), "Offset of RCX is invalid!");
+//static_assert(COTTON_CONTEXT_RDX == offsetof(Context, rdx), "Offset of RDX is invalid!");
 
-void init_stack(Context* ctx, char* stack, size_t stack_size);
+extern "C" void (*get_context)(Context*);
+extern "C" void (*set_context)(Context*);
+extern "C" void (*swap_context)(Context* current, Context* target);

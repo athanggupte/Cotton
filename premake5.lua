@@ -40,11 +40,13 @@ project "Cotton"
     files {
         "src/**.cpp",
         "src/**.h",
+        "include/Cotton/**.h",
         "platform/embed/context__%{TARGET_ARCH}_%{TARGET_PLATFORM}.c",
     }
 
     includedirs {
         "src/",
+        "include/Cotton",
     }
 
     filter "configurations:Debug"
@@ -56,39 +58,7 @@ project "Cotton"
         optimize "On"
 
 
-project "Tests"
-    location "tests"
-    kind "ConsoleApp"
-    language "C++"
-    cppdialect "C++17"
-
-    targetdir ("%{wks.location}/bin/"..outputdir.."/%{prj.name}")
-    objdir ("%{wks.location}/obj/"..outputdir.."/%{prj.name}")
-
-    files {
-        "src/**.cpp",
-        "src/**.h",
-    }
-
-    includedirs {
-        "%{wks.location}/src/",
-        "%{wks.location}/dependencies/googletest/googletest/include",
-    }
-
-    links {
-        "Cotton",
-        "gtest"
-    }
-
-    filter "configurations:Debug"
-        runtime "Debug"
-        symbols "On"
-        
-    filter "configurations:Release"
-        runtime "Release"
-        optimize "On"
-
-    filter "system:linux"
-        links {
-            "pthread",
-        }
+if _OPTIONS["skip-tests"] == "false" then
+group "testing"
+include "tests"
+end

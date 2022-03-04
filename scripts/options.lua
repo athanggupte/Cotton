@@ -29,7 +29,7 @@ newoption {
     trigger     = "skip-tests",
     description = "Skip building unit tests",
     value       = "true/false",
-    default     = "true",
+    default     = "false",
     allowed     = {
         { "true" },
         { "false" }
