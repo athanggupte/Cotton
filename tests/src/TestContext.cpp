@@ -1,5 +1,5 @@
 ﻿#include <gtest/gtest.h>
-#include <Context.h>
+#include <impl/Context.h>
 
 TEST(ContextSuite, GetSetContextLoop)
 {
