@@ -8,8 +8,9 @@ namespace Cotton
 	{
 		std::atomic_uint64_t m_atomic{0};
 	};
-	Counter* allocCounter();
-	void freeCounter(Counter* p_counter);
+
+	Counter& allocCounter();
+	void freeCounter(Counter& counter);
 	void incrementCounter(Counter& counter)
 	{
 		++counter.m_atomic;

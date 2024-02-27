@@ -6,81 +6,33 @@
 #include <mutex>
 #include <vector>
 
-#include "JobSystem-internal.h"
+#include "ThreadFiberContext.h"
 
 namespace Cotton {
 
-	static void trampoline(PFN_JobEntryPoint entry_point, void* param)
+	JobDecl JobQueue::popJob()
 	{
-		entry_point(param);
-		// The job's main function body has returned so the context need not be saved
-		// Directly jump to the scheduler fiber
-		set_context(&_getThreadFiberContext()->m_jobSchedulerFiber.m_context);
-	}
-
-	void initializeFiber(Fiber& fiber, const JobDecl& job)
-	{
-		assert((reinterpret_cast<uintptr_t>(fiber.m_pStack) & 15ui64) == 0); // stack must be 16 byte aligned!
-
-		uintptr_t* stack_top = reinterpret_cast<uintptr_t*>(fiber.m_pStack + fiber.m_stackSize); // Pointing beyond the stack bound
-		// -1 -> 8 byte aligned
-		// -2 -> 16 byte aligned  <--- will start reading from here
-		stack_top[-2] = 0; // Set the return address to 0x0
-		fiber.m_context.rsp = &stack_top[-3]; // stack_top - 24
-
-		// Set the Instruction Pointer (RIP) to the job's entry point
-		fiber.m_context.rip = reinterpret_cast<void*>(trampoline);
-
-#ifdef _WIN32
-		fiber.m_context.rcx = reinterpret_cast<void*>(job.m_pEntryPoint);
-		fiber.m_context.rdx = static_cast<void*>(job.m_pParam);
-#else
-		fiber.m_context.rdi = reinterpret_cast<void*>(job.m_pEntryPoint);
-		fiber.m_context.rsi = static_cast<void*>(job.m_param);
-#endif
-	}
-
-	void switchToFiber(Fiber& fiber)
-	{
-		assert(&fiber != _getThreadFiberContext()->m_currentRunningFiber);
-		Fiber* currentFiber = _getThreadFiberContext()->m_currentRunningFiber;
-		_getThreadFiberContext()->m_currentRunningFiber = &fiber;
-		swap_context(&currentFiber->m_context, &fiber.m_context);
-	}
-
-	void yieldFiber()
-	{
-		assert(_getThreadFiberContext()->m_currentRunningFiber != nullptr);
-
-		switchToFiber(_getThreadFiberContext()->m_jobSchedulerFiber);
-	}
-
-	struct JobQueue
-	{
-		std::deque<JobDecl*> m_jobs;
-		std::mutex m_mutex;
-		std::condition_variable m_cvar;
-
-		JobDecl* popJob()
+		std::unique_lock lock(m_mutex);
+		int count = 0;
+		while (count < kMaxRetries && m_jobs.empty())
 		{
-			std::unique_lock lock(m_mutex);
-			while (m_jobs.empty())
-			{
-				m_cvar.wait_for(lock, std::chrono::microseconds(25));
-			}
-
-			JobDecl* jobDecl = m_jobs.front();
-			m_jobs.pop_front();
-			return jobDecl;
+			++count;
+			m_cvar.wait_for(lock, std::chrono::microseconds(25));
 		}
+		if (m_jobs.empty())
+			return { nullptr };
 
-		void pushJob(JobDecl* job_decl)
-		{
-			std::unique_lock lock(m_mutex);
-			m_jobs.push_back(job_decl);
-			m_cvar.notify_one();
-		}
-	};
+		const JobDecl jobDecl = m_jobs.front();
+		m_jobs.pop_front();
+		return jobDecl;
+	}
+
+	void JobQueue::pushJob(JobDecl const& job_decl)
+	{
+		std::unique_lock lock(m_mutex);
+		m_jobs.push_back(job_decl);
+		m_cvar.notify_one();
+	}
 
 	struct FiberRef
 	{
@@ -90,7 +42,7 @@ namespace Cotton {
 	struct FiberList
 	{
 		std::vector<Fiber> m_fibers;
-		std::deque<uint32_t> m_unusedIndices;
+		std::deque<FiberRef> m_unusedFibers;
 
 		std::mutex m_mutex;
 		std::condition_variable m_cvar;
@@ -101,27 +53,27 @@ namespace Cotton {
 
 			for (uint32_t i = 0; i < size; i++)
 			{
-				m_unusedIndices.push_back(i);
+				m_unusedFibers.push_back({i});
 			}
 		}
 
 		FiberRef getFiber()
 		{
 			std::unique_lock lock(m_mutex);
-			while (m_unusedIndices.empty())
+			while (m_unusedFibers.empty())
 			{
 				m_cvar.wait_for(lock, std::chrono::microseconds(100));
 			}
 
-			uint32_t fiberIdx = m_unusedIndices.front();
-			m_unusedIndices.pop_front();
-			return { fiberIdx };
+			const FiberRef fiberIdx = m_unusedFibers.front();
+			m_unusedFibers.pop_front();
+			return fiberIdx;
 		}
 
 		void returnFiber(FiberRef fiber)
 		{
 			std::unique_lock lock(m_mutex);
-			m_unusedIndices.push_back(fiber.m_fiberId);
+			m_unusedFibers.push_back(fiber);
 			m_cvar.notify_one();
 		}
 	};
@@ -141,14 +93,23 @@ namespace Cotton {
 		FiberWaitList s_waitList;
 		uint8_t *s_fiberStackMemory;
 
+		std::mutex s_metricsMutex;
+		std::vector<Metrics> s_metrics;
+
 		std::vector<std::thread> s_threads;
 
 		std::atomic_bool s_bIsRunning{false};
 	};
 
-	inline JobQueue& _getJobQueue()
+	JobQueue& _getJobQueue()
 	{
 		return detail::s_jobQueue;
+	}
+
+	Metrics& _getMetrics()
+	{
+		std::lock_guard lock(detail::s_metricsMutex);
+		return detail::s_metrics.emplace_back();
 	}
 
 	inline FiberList& _getFiberList()
@@ -161,7 +122,7 @@ namespace Cotton {
 		return detail::s_waitList;
 	}
 
-	inline Fiber& fromFiberRef(FiberRef ref)
+	inline Fiber& _fromFiberRef(FiberRef ref)
 	{
 		return detail::s_fiberList.m_fibers[ref.m_fiberId];
 	}
@@ -186,9 +147,10 @@ namespace Cotton {
 		}
 	}
 
-	void _initializeThreadForFibers()
+	void _initializeThreadForFibers(uint32_t thread_id)
 	{
 		Cotton::ThreadFiberContext* context = Cotton::_getThreadFiberContext();
+		context->m_threadId = thread_id;
 		Cotton::Fiber& mainFiber = context->m_jobSchedulerFiber;
 		context->m_currentRunningFiber = &mainFiber;
 		context->m_bIsRunning = true;
@@ -198,28 +160,33 @@ namespace Cotton {
 
 	void _shutdownWorkerThread(void*)
 	{
-		_getThreadFiberContext()->m_bIsRunning = false;
+		//printf("Shutting down worker thread\n");
+		// _getThreadFiberContext()->m_bIsRunning = false;
+		_getThreadFiberContext()->m_bShouldExit = true;
 	}
 
-	void _runWorkerThread()
+	void _runWorkerThread(uint32_t thread_id)
 	{
-		_initializeThreadForFibers();
+		_initializeThreadForFibers(thread_id);
 
-		while (_getThreadFiberContext()->m_bIsRunning) {
+		auto ctx = *_getThreadFiberContext();
+
+		while (ctx.m_bIsRunning) {
 		//     Check if there is a waiting Fiber in the wait list that is ready to run, i.e. its wait counter is 0
 		//         switch to the waiting Fiber if found
 		//     Grab a JobDecl from the queue
 		//     Pull a Fiber from the set of available fibers
 		//         initialize the Fiber with the JobDecl
 		//         switch to the Fiber
-			JobDecl* jobDecl = _getJobQueue().popJob();
-			if (jobDecl != nullptr)
+			
+			JobDecl jobDecl = _getJobQueue().popJob();
+			if (jobDecl.m_pEntryPoint != nullptr)
 			{
 				FiberRef fiberRef = _getFiberList().getFiber();
 				{
-					Fiber& fiber = fromFiberRef(fiberRef);
+					Fiber& fiber = _fromFiberRef(fiberRef);
 
-					initializeFiber(fiber, *jobDecl);
+					initializeFiber(fiber, jobDecl);
 					switchToFiber(fiber);
 				}
 
@@ -227,32 +194,57 @@ namespace Cotton {
 			}
 			else
 			{
-				
+#define PRINT_THREAD_ID \
+	printf("<%d", _getThreadFiberContext()->m_threadId); \
+	for (int i = 0; i < _getThreadFiberContext()->m_threadId; i++) printf("*"); \
+	printf(">")
+
+				PRINT_THREAD_ID;
+				printf(" : No job to run\n");
+				if (_shouldExit() /*ctx.m_bShouldExit*/)
+				{
+					PRINT_THREAD_ID;
+					printf(" : Exiting\n", _getThreadFiberContext()->m_threadId);
+					break;
+				}
+				_mm_pause();
 			}
 		}
+
+		_getThreadFiberContext()->submitMetrics();
+		PRINT_THREAD_ID;
+		printf(" : Exited\n");
 	}
 
 	void startJobSystem()
 	{
-		uint32_t numThreads = std::min(std::thread::hardware_concurrency(), 8u);
+		const uint32_t numThreads = std::min(std::thread::hardware_concurrency(), 8u);
 
 		detail::s_threads.reserve(numThreads);
+		detail::s_threads.clear();
 
 		for (uint32_t i = 0; i < numThreads; i++)
 		{
-			detail::s_threads.emplace_back(_runWorkerThread);
+			detail::s_threads.emplace_back(_runWorkerThread, i);
 		}
 	}
 
 	void _waitForAllJobs()
 	{
-		JobDecl jobDecl;
+		/*JobDecl jobDecl;
 		jobDecl.m_pEntryPoint = _shutdownWorkerThread;
+
+		while (!_getJobQueue().m_jobs.empty())
+		{
+			_mm_pause();
+		}
 
 		for (uint32_t i = 0; i < detail::s_threads.size(); i++)
 		{
-			_getJobQueue().pushJob(&jobDecl);
-		}
+			_getJobQueue().pushJob(jobDecl);
+		}*/
+
+		detail::s_bIsRunning.store(false);
 
 		for (uint32_t i = 0; i < detail::s_threads.size(); i++)
 		{
@@ -260,16 +252,22 @@ namespace Cotton {
 		}
 	}
 
-	void runJob(JobDecl& job_decl)
+	bool _shouldExit()
 	{
-		_getJobQueue().pushJob(&job_decl);
+		return !detail::s_bIsRunning.load();
 	}
 
-	void runJobs(int count, JobDecl job_decls[])
+	void addJob(JobDecl const& job_decl)
+	{
+		_getJobQueue().pushJob(job_decl);
+		//printf("Added job. Total number of waiting jobs = %llu\n", _getJobQueue().m_jobs.size());
+	}
+
+	void addJobs(int count, JobDecl job_decls[])
 	{
 		for (int i = 0; i < count; i++)
 		{
-			_getJobQueue().pushJob(&job_decls[i]);
+			_getJobQueue().pushJob(job_decls[i]);
 		}
 	}
 

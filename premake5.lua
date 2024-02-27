@@ -32,7 +32,7 @@ project "Cotton"
     location ""
     kind "StaticLib"
     language "C++"
-    cppdialect "C++17"
+    cppdialect "C++20"
 
     targetdir ("%{wks.location}/bin/"..outputdir.."/%{prj.name}")
     objdir ("%{wks.location}/obj/"..outputdir.."/%{prj.name}")

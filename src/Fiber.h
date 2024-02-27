@@ -3,6 +3,8 @@
 
 #include "impl/Context.h"
 
+#define COTTON_ENABLE_STACK_CHECK 1
+
 namespace Cotton {
 	struct JobDecl;
 
